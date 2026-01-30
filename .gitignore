@@ -182,7 +182,9 @@ cython_debug/
 
 ## personal
 .DS_Store
-outdated/
-*.txt
-tester.py
 */.DS_Store
+outdated/
+*.zip
+*.txt
+tester*.py
+#tester.py

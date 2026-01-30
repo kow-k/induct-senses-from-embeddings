@@ -377,7 +377,7 @@ class SenseExplorer:
             self._sense_cache[cache_key] = {'default': emb}
             return {'default': emb}
         
-        sense_embs = self._simulated_repair(word, sense_centroids, noise)
+        sense_embs = self._simulated_repair(word, sense_centroids, noise, sense_loyal=False)
         
         self._sense_cache[cache_key] = sense_embs
         self._anchor_cache[cache_key] = anchors
@@ -440,7 +440,7 @@ class SenseExplorer:
             self._sense_cache[cache_key] = {'default': emb}
             return {'default': emb}
         
-        sense_embs = self._simulated_repair(word, sense_centroids, noise)
+        sense_embs = self._simulated_repair(word, sense_centroids, noise, sense_loyal=True)
         
         self._sense_cache[cache_key] = sense_embs
         self._anchor_cache[cache_key] = anchors
@@ -573,7 +573,7 @@ class SenseExplorer:
             trial_results = []
             
             for _ in range(n_trials):
-                sense_embs = self._simulated_repair(word, sense_centroids, noise)
+                sense_embs = self._simulated_repair(word, sense_centroids, noise, sense_loyal=True)
                 k = len(sense_embs)
                 trial_counts.append(k)
                 trial_results.append(sense_embs)
@@ -628,7 +628,7 @@ class SenseExplorer:
         if optimal_noise in results_by_noise:
             final_senses = results_by_noise[optimal_noise]
         else:
-            final_senses = self._simulated_repair(word, sense_centroids, optimal_noise)
+            final_senses = self._simulated_repair(word, sense_centroids, optimal_noise, sense_loyal=True)
         
         # Cache
         self._sense_cache[word] = final_senses
@@ -880,7 +880,7 @@ class SenseExplorer:
             self._sense_cache[cache_key] = {'default': emb}
             return {'default': emb}
         
-        sense_embs = self._simulated_repair(word, sense_centroids, noise)
+        sense_embs = self._simulated_repair(word, sense_centroids, noise, sense_loyal=False)
         
         self._sense_cache[cache_key] = sense_embs
         self._anchor_cache[cache_key] = anchors
@@ -904,15 +904,27 @@ class SenseExplorer:
         self,
         word: str,
         sense_centroids: Dict[str, np.ndarray],
-        noise_level: float
+        noise_level: float,
+        sense_loyal: bool = True
     ) -> Dict[str, np.ndarray]:
         """
         Run simulated self-repair to discover sense-specific embeddings.
         
         This is the core algorithm:
-          1. Create seeded noisy copies
-          2. Iteratively pull toward sense centroids
-          3. Average copies by final sense assignment
+          1. Create seeded noisy copies (each copy is seeded toward a specific sense)
+          2. Iteratively pull copies toward sense centroids
+          3. Average copies by sense assignment
+        
+        Args:
+            word: Target word
+            sense_centroids: Dict of sense_name -> centroid vector
+            noise_level: Amount of noise to add
+            sense_loyal: If True, copies stay with seeded sense (for induction).
+                        If False, copies can switch to nearest sense (for discovery).
+        
+        Note on sense_loyal:
+          - True (default): For INDUCTION - ensures all specified senses are found
+          - False: For DISCOVERY - allows natural attractor dynamics
         """
         embedding = self.embeddings[word]
         senses = list(sense_centroids.keys())
@@ -921,8 +933,9 @@ class SenseExplorer:
         
         # Create seeded noisy copies
         copies = []
+        copy_sense_ids = []  # Track which sense each copy was seeded toward
         
-        for sense in senses:
+        for sense_idx, sense in enumerate(senses):
             centroid = sense_centroids[sense]
             for _ in range(copies_per_sense):
                 copy = embedding.copy()
@@ -939,8 +952,10 @@ class SenseExplorer:
                 copy += self.seed_strength * direction * norm(copy)
                 
                 copies.append(copy)
+                copy_sense_ids.append(sense_idx)
         
         copies = np.array(copies)
+        copy_sense_ids = np.array(copy_sense_ids)
         centroid_matrix = np.array([sense_centroids[s] for s in senses])
         
         # Self-organization iterations
@@ -950,27 +965,40 @@ class SenseExplorer:
             norms = np.linalg.norm(copies, axis=1, keepdims=True) + 1e-10
             copies_norm = copies / norms
             
-            # Assign to nearest sense
-            similarities = copies_norm @ centroid_matrix.T
-            assignments = np.argmax(similarities, axis=1)
-            
-            # Pull toward assigned sense centroid
-            for i in range(len(copies)):
-                target = centroid_matrix[assignments[i]]
-                direction = target - copies_norm[i]
-                copies[i] += current_pull * direction * norms[i, 0]
+            if sense_loyal:
+                # SENSE-LOYAL: Pull toward SEEDED sense (for induction)
+                for i in range(len(copies)):
+                    target = centroid_matrix[copy_sense_ids[i]]
+                    direction = target - copies_norm[i]
+                    copies[i] += current_pull * direction * norms[i, 0]
+            else:
+                # COMPETITIVE: Pull toward NEAREST sense (for discovery)
+                similarities = copies_norm @ centroid_matrix.T
+                assignments = np.argmax(similarities, axis=1)
+                
+                for i in range(len(copies)):
+                    target = centroid_matrix[assignments[i]]
+                    direction = target - copies_norm[i]
+                    copies[i] += current_pull * direction * norms[i, 0]
             
             current_pull *= 0.95  # Decay
         
-        # Final assignment
+        # Final sense assignment
         norms = np.linalg.norm(copies, axis=1, keepdims=True) + 1e-10
         copies_norm = copies / norms
-        similarities = copies_norm @ centroid_matrix.T
-        final_assignments = np.argmax(similarities, axis=1)
         
-        # Average copies by sense (only if sufficient copies)
+        if sense_loyal:
+            # Use seeded sense assignment
+            final_assignments = copy_sense_ids
+            min_copies = 1  # Keep all senses that have at least 1 copy
+        else:
+            # Use nearest sense assignment
+            similarities = copies_norm @ centroid_matrix.T
+            final_assignments = np.argmax(similarities, axis=1)
+            min_copies = self.n_copies * 0.05  # At least 5% threshold
+        
+        # Average copies by sense
         sense_embeddings = {}
-        min_copies = self.n_copies * 0.05  # At least 5% of copies
         
         for sense_idx, sense in enumerate(senses):
             mask = final_assignments == sense_idx

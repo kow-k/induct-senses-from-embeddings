@@ -10,7 +10,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="sense-explorer",
-    version="0.4.0",
+    version="0.6.0",
     author="Kow Kuroda & Claude",
     author_email="kow.k@ks.kyorin-u.ac.jp",
     description="From sense discovery to sense induction via simulated self-repair",
