@@ -186,6 +186,4 @@ cython_debug/
 outdated/
 *.zip
 *.txt
-diagnose_sense_induction.py
-tester*.py
-#tester.py
+*.py
