@@ -4,18 +4,23 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.4.0-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.6.0-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
-## Two Operational Modes
+## Three Capabilities
 
-| Mode | Method | Supervision | Accuracy | Sense Names |
-|------|--------|-------------|----------|-------------|
-| **Discovery** | `discover_senses()` | Unsupervised | 56% | `sense_0`, `sense_1`, ... |
-| **Induction** | `induce_senses()` | Weakly supervised | 88% | `financial`, `river`, ... |
+| Capability | Method | Supervision | Accuracy |
+|------------|--------|-------------|----------|
+| **Sense Discovery** | `discover_senses()` | Unsupervised | 56% |
+| **Sense Discovery (Auto)** | `discover_senses_auto()` | Unsupervised + Parameter-free | 56% |
+| **Sense Induction** | `induce_senses()` | Weakly supervised | 88% |
+| **Polarity Classification** | `get_polarity()` | Supervised | 97% |
 
-**Key insight**: Senses can be **discovered** (emerging from distributional structure alone) or **induced** (guided toward anchor-defined targets). Both use the same self-repair mechanism but differ in supervision level.
+**Key insight**: 
+- Senses can be **discovered** (from data alone) or **induced** (anchor-guided)
+- **Semantic categories** self-organize; **polarity** within categories requires supervision
+- **X-means** automatically determines optimal sense count (no n_senses needed!)
 
 ## Installation
 
@@ -42,21 +47,64 @@ from sense_explorer import SenseExplorer
 # Load embeddings
 se = SenseExplorer.from_glove("glove.6B.100d.txt")
 
-# UNSUPERVISED: True sense discovery (56% accuracy)
+# UNSUPERVISED: Sense discovery with specified n_senses
 senses = se.discover_senses("bank", n_senses=2)
 print(senses.keys())  # dict_keys(['sense_0', 'sense_1'])
+
+# PARAMETER-FREE: X-means auto-discovers optimal sense count
+senses = se.discover_senses_auto("bank")  # No n_senses needed!
+print(f"Found {len(senses)} senses")  # Automatically determined
 
 # WEAKLY SUPERVISED: Anchor-guided induction (88% accuracy)
 senses = se.induce_senses("bank")
 print(senses.keys())  # dict_keys(['financial', 'river'])
 
-# AUTO MODE: Uses induction if anchors available, else discovery
+# SUPERVISED: Polarity classification (97% accuracy)
+polarity = se.get_polarity("excellent")
+print(polarity)  # {'polarity': 'positive', 'score': 0.82, ...}
+
+# AUTO MODE: Uses best available method
 senses = se.explore_senses("bank", mode='auto')
 ```
 
-## The Two Modes Explained
+## Polarity Classification (97% Accuracy)
 
-### Unsupervised Discovery (`discover_senses`)
+Detect positive/negative valence within semantic categories:
+
+```python
+# Simple polarity check
+polarity = se.get_polarity("wonderful")
+# {'polarity': 'positive', 'score': 0.78, 'confidence': 0.92}
+
+# Classify multiple words
+result = se.classify_polarity(['good', 'bad', 'happy', 'sad', 'table'])
+# {'positive': ['good', 'happy'], 'negative': ['bad', 'sad'], 'neutral': ['table']}
+
+# Use domain-specific polarity (quality, morality, health, etc.)
+pf = se.get_polarity_finder(domain='quality')
+pf.get_polarity("excellent")  # Uses quality-specific seeds
+
+# Advanced: PolarityFinder directly
+from sense_explorer import PolarityFinder
+pf = PolarityFinder(se.embeddings)
+pf.most_polar_words(top_k=10)
+pf.find_polar_opposites("happy")
+```
+
+### Available Polarity Domains
+
+| Domain | Positive Pole | Negative Pole |
+|--------|---------------|---------------|
+| `sentiment` | happy, joy, love | sad, angry, hate |
+| `quality` | excellent, superior | poor, inferior |
+| `morality` | good, virtuous | evil, wicked |
+| `health` | healthy, strong | sick, weak |
+| `size` | big, large, huge | small, tiny, little |
+| `temperature` | hot, warm | cold, freezing |
+
+## The Three Modes Explained
+
+### 1. Unsupervised Discovery (`discover_senses`)
 
 True sense discovery from distributional data alone:
 - No external knowledge required
@@ -65,11 +113,26 @@ True sense discovery from distributional data alone:
 - ~56% accuracy
 
 ```python
-# Purely data-driven - what does the embedding tell us?
 senses = se.discover_senses("bank", n_senses=2)
 ```
 
-### Weakly Supervised Induction (`induce_senses`)
+### 1b. Parameter-Free Discovery (`discover_senses_auto`)
+
+**NEW in v0.6.0**: X-means clustering for automatic sense count:
+- No need to specify `n_senses`!
+- Uses BIC (Bayesian Information Criterion) to find optimal k
+- Truly parameter-free unsupervised discovery
+
+```python
+# No n_senses needed - X-means finds optimal count automatically
+senses = se.discover_senses_auto("bank")
+print(f"Found {len(senses)} senses")  # Automatically determined!
+
+# Or use explore_senses with mode='discover_auto'
+senses = se.explore_senses("bank", mode='discover_auto')
+```
+
+### 2. Weakly Supervised Induction (`induce_senses`)
 
 Knowledge-guided sense induction:
 - Uses FrameNet frames or WordNet glosses as anchors
@@ -78,7 +141,6 @@ Knowledge-guided sense induction:
 - ~88% accuracy
 
 ```python
-# Knowledge-guided - we hint at what senses to find
 senses = se.induce_senses("bank")
 
 # Or provide custom anchors
@@ -88,48 +150,48 @@ senses = se.induce_senses("bank", anchors={
 })
 ```
 
+### 3. Supervised Polarity (`get_polarity`)
+
+Polarity classification with seed supervision:
+- Requires positive/negative seed words
+- Projects words onto polarity axis
+- Binary classification with confidence
+- ~97% accuracy
+
+```python
+polarity = se.get_polarity("terrible")
+# {'polarity': 'negative', 'score': -0.71, 'confidence': 0.88}
+```
+
 ## Theoretical Background
+
+### The Supervision Spectrum
+
+```
+Fully Unsupervised    Weakly Supervised    Fully Supervised
+       │                     │                    │
+  discover_senses()    induce_senses()     get_polarity()
+  discover_senses_auto()                        
+       │                     │                    │
+   No targets          Anchor targets        Seed labels
+   56% accuracy        88% accuracy          97% accuracy
+       │
+  X-means: auto k
+  (parameter-free!)
+```
+
+### Why Polarity Needs Supervision
+
+- **Semantic categories** (bank-financial vs bank-river) self-organize
+- **Polarity** (good vs bad within a category) doesn't self-organize
+- Polarity requires **contrast**: we must tell the system what "positive" means
 
 ### DNA Self-Repair Analogy
 
-Both modes use the same biologically-inspired mechanism:
-
+Both sense discovery and induction use the same mechanism:
 1. **Damage** (noise injection): Perturb the embedding
-2. **Repair** (self-organization): Allow copies to settle into stable configurations
-3. **Diagnosis** (attractor identification): Observe which "attractor basins" copies settle into
-
-### Discovery vs Induction
-
-| Aspect | Discovery | Induction |
-|--------|-----------|-----------|
-| **Targets** | Emerge FROM data | Provided TO system |
-| **Supervision** | None | Weak (anchors) |
-| **Analogy** | "What senses exist?" | "Are these senses present?" |
-| **Accuracy** | 56% | 88% |
-
-### Why the Accuracy Difference?
-
-- **Discovery** must find structure without guidance → prone to noise
-- **Induction** has anchor targets → more robust to noise
-
-Frame Elements ≈ WordNet Gloss Nouns ≈ Distributional Co-occurrence
-All capture "situational participants" — enabling effective weak supervision.
-
-## Noise as Granularity Control
-
-```python
-# Fine-grained (may over-split)
-se.set_noise_level(0.2)
-senses = se.induce_senses("cell")  # May find 4-5 senses
-
-# Standard (recommended)
-se.set_noise_level(0.5)
-senses = se.induce_senses("cell")  # Typically 2-3 senses
-
-# Coarse-grained
-se.set_noise_level(0.7)
-senses = se.induce_senses("cell")  # May merge to 2 senses
-```
+2. **Repair** (self-organization): Settle into stable configurations
+3. **Diagnosis** (attractor identification): Observe attractor basins
 
 ## API Reference
 
@@ -140,7 +202,6 @@ SenseExplorer(
     embeddings,              # Dict[str, np.ndarray]
     dim=None,                # Auto-detected
     default_n_senses=2,      # Default sense count
-    n_copies=100,            # Noisy copies for self-repair
     noise_level=0.5,         # Granularity control (0.1-0.8)
     use_hybrid_anchors=True, # Enable hybrid extraction for induction
     verbose=True
@@ -151,12 +212,29 @@ SenseExplorer(
 
 | Method | Mode | Description |
 |--------|------|-------------|
-| `discover_senses(word)` | Unsupervised | True sense discovery |
+| `discover_senses(word, n_senses)` | Unsupervised | Sense discovery (k-means) |
+| `discover_senses_auto(word)` | Unsupervised | Parameter-free discovery (X-means) |
 | `induce_senses(word)` | Weakly supervised | Anchor-guided induction |
 | `explore_senses(word, mode)` | Auto | Convenience wrapper |
-| `induce_senses_stable(word)` | Weakly supervised | Stability-based induction |
+| `get_polarity(word)` | Supervised | Polarity classification |
+| `classify_polarity(words)` | Supervised | Batch polarity |
+| `get_polarity_finder(domain)` | Supervised | Advanced polarity ops |
 | `similarity(w1, w2)` | - | Sense-aware similarity |
 | `disambiguate(word, context)` | - | Context-based disambiguation |
+
+### PolarityFinder
+
+```python
+from sense_explorer import PolarityFinder
+
+pf = PolarityFinder(embeddings, positive_seeds, negative_seeds)
+pf.get_polarity(word)           # Single word
+pf.classify_words(words)        # Multiple words
+pf.find_polar_opposites(word)   # Find antonyms
+pf.most_polar_words(top_k=20)   # Extreme words
+pf.set_domain('quality')        # Switch domain
+pf.evaluate_accuracy(pos, neg)  # Test accuracy
+```
 
 ## Citation
 

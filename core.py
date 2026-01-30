@@ -34,7 +34,7 @@ License: MIT
 Repository: https://github.com/kow-k/sense-explorer
 """
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np
@@ -461,26 +461,36 @@ class SenseExplorer:
         
         Args:
             word: Target word
-            mode: 'discover' (unsupervised), 'induce' (weakly supervised),
-                  or 'auto' (induce if anchors available, else discover)
-            **kwargs: Passed to discover_senses() or induce_senses()
+            mode: One of:
+                  - 'discover': Unsupervised with specified n_senses
+                  - 'discover_auto': Unsupervised, auto-detect n_senses (X-means)
+                  - 'induce': Weakly supervised with anchors
+                  - 'auto': Induce if anchors available, else discover_auto
+            **kwargs: Passed to the underlying method
         
         Returns:
             Dict mapping sense names to sense-specific embeddings
+        
+        Example:
+            >>> se.explore_senses("bank", mode='discover_auto')  # X-means
+            >>> se.explore_senses("bank", mode='induce')         # With anchors
+            >>> se.explore_senses("bank", mode='auto')           # Best available
         """
         if mode == 'discover':
             return self.discover_senses(word, **kwargs)
+        elif mode == 'discover_auto':
+            return self.discover_senses_auto(word, **kwargs)
         elif mode == 'induce':
             return self.induce_senses(word, **kwargs)
         elif mode == 'auto':
-            # Try hybrid extraction; if fails, fall back to discovery
+            # Try hybrid extraction; if fails, fall back to X-means discovery
             if self._hybrid_extractor is not None:
                 anchors, source = self._hybrid_extractor.extract(word, kwargs.get('n_senses', 2))
                 if anchors and source != 'auto':
                     return self.induce_senses(word, anchors=anchors, **kwargs)
-            return self.discover_senses(word, **kwargs)
+            return self.discover_senses_auto(word, **kwargs)
         else:
-            raise ValueError(f"Unknown mode: {mode}. Use 'discover', 'induce', or 'auto'")
+            raise ValueError(f"Unknown mode: {mode}. Use 'discover', 'discover_auto', 'induce', or 'auto'")
     
     def _extract_anchors_hybrid(self, word: str, n_senses: int) -> Dict[str, List[str]]:
         """
@@ -681,6 +691,201 @@ class SenseExplorer:
                 anchors[f"sense_{sense_idx}"] = cluster_words[:self.n_anchors]
         
         return anchors
+    
+    def _discover_anchors_xmeans(
+        self, 
+        word: str, 
+        max_senses: int = 6,
+        min_senses: int = 2
+    ) -> Tuple[Dict[str, List[str]], int]:
+        """
+        UNSUPERVISED + PARAMETER-FREE: Discover anchors via X-means clustering.
+        
+        X-means automatically determines the optimal number of clusters using
+        BIC (Bayesian Information Criterion). This makes sense discovery
+        truly parameter-free.
+        
+        Args:
+            word: Target word
+            max_senses: Maximum number of senses to consider
+            min_senses: Minimum number of senses to consider
+        
+        Returns:
+            Tuple of (anchors dict, optimal_k)
+        """
+        target_emb = self._embeddings_norm[word]
+        
+        # Find nearest neighbors
+        k_neighbors = min(100, self.vocab_size - 1)
+        
+        similarities = []
+        for w, emb in self._embeddings_norm.items():
+            if w == word:
+                continue
+            sim = np.dot(target_emb, emb)
+            similarities.append((w, sim, self.embeddings[w]))
+        
+        similarities.sort(key=lambda x: -x[1])
+        neighbors = similarities[:k_neighbors]
+        
+        neighbor_words = [n[0] for n in neighbors]
+        neighbor_vecs = np.array([n[2] for n in neighbors])
+        
+        # Normalize for clustering
+        norms = np.linalg.norm(neighbor_vecs, axis=1, keepdims=True) + 1e-10
+        neighbor_vecs_norm = neighbor_vecs / norms
+        
+        # X-means: try different k values and select by BIC
+        best_bic = float('-inf')
+        best_k = min_senses
+        best_assignments = None
+        best_centroids = None
+        
+        for k in range(min_senses, max_senses + 1):
+            assignments, centroids = self._kmeans(neighbor_vecs_norm, k, max_iter=50)
+            bic = self._compute_bic(neighbor_vecs_norm, assignments, centroids, k)
+            
+            if bic > best_bic:
+                best_bic = bic
+                best_k = k
+                best_assignments = assignments
+                best_centroids = centroids
+        
+        # Group neighbors by cluster
+        anchors = {}
+        for sense_idx in range(best_k):
+            mask = best_assignments == sense_idx
+            cluster_words = [neighbor_words[i] for i in range(len(neighbor_words)) if mask[i]]
+            
+            if cluster_words:
+                anchors[f"sense_{sense_idx}"] = cluster_words[:self.n_anchors]
+        
+        return anchors, best_k
+    
+    def _compute_bic(
+        self,
+        data: np.ndarray,
+        assignments: np.ndarray,
+        centroids: np.ndarray,
+        k: int
+    ) -> float:
+        """
+        Compute Bayesian Information Criterion (BIC) for clustering.
+        
+        BIC = log-likelihood - (penalty for model complexity)
+        Higher BIC = better model (balances fit vs complexity)
+        
+        Args:
+            data: Data points (n_samples, n_features)
+            assignments: Cluster assignments
+            centroids: Cluster centroids
+            k: Number of clusters
+        
+        Returns:
+            BIC score (higher is better)
+        """
+        n_samples, n_features = data.shape
+        
+        # Compute within-cluster variance
+        total_variance = 0.0
+        cluster_sizes = []
+        
+        for cluster_idx in range(k):
+            mask = assignments == cluster_idx
+            cluster_size = np.sum(mask)
+            cluster_sizes.append(cluster_size)
+            
+            if cluster_size > 1:
+                cluster_points = data[mask]
+                centroid = centroids[cluster_idx]
+                # Sum of squared distances to centroid
+                distances = np.sum((cluster_points - centroid) ** 2)
+                total_variance += distances
+        
+        # Avoid division by zero
+        if n_samples <= k:
+            return float('-inf')
+        
+        # Estimate variance
+        variance = total_variance / (n_samples - k) if (n_samples - k) > 0 else 1e-10
+        variance = max(variance, 1e-10)  # Avoid log(0)
+        
+        # Log-likelihood (assuming Gaussian clusters)
+        log_likelihood = 0.0
+        for cluster_idx in range(k):
+            n_i = cluster_sizes[cluster_idx]
+            if n_i > 0:
+                # Log-likelihood for this cluster
+                log_likelihood += n_i * np.log(n_i / n_samples)  # Prior
+                log_likelihood -= n_i * n_features / 2 * np.log(2 * np.pi * variance)  # Gaussian
+                log_likelihood -= (n_i - 1) / 2  # Correction
+        
+        # Number of parameters: k centroids * n_features + k-1 mixing proportions + 1 variance
+        n_params = k * n_features + k
+        
+        # BIC = log-likelihood - penalty
+        bic = log_likelihood - n_params / 2 * np.log(n_samples)
+        
+        return bic
+    
+    def discover_senses_auto(
+        self,
+        word: str,
+        max_senses: int = 6,
+        min_senses: int = 2,
+        noise_level: float = None,
+        force: bool = False
+    ) -> Dict[str, np.ndarray]:
+        """
+        PARAMETER-FREE sense discovery using X-means clustering.
+        
+        Automatically determines the optimal number of senses using
+        Bayesian Information Criterion (BIC). No need to specify n_senses!
+        
+        Args:
+            word: Target word
+            max_senses: Maximum senses to consider (default: 6)
+            min_senses: Minimum senses to consider (default: 2)
+            noise_level: Override default noise level
+            force: Force rediscovery even if cached
+        
+        Returns:
+            Dict mapping sense names to sense-specific embeddings
+        
+        Example:
+            >>> se = SenseExplorer.from_glove("glove.txt")
+            >>> senses = se.discover_senses_auto("bank")  # No n_senses needed!
+            >>> print(f"Found {len(senses)} senses: {list(senses.keys())}")
+            Found 2 senses: ['sense_0', 'sense_1']
+        """
+        if word not in self.vocab:
+            raise ValueError(f"Word '{word}' not in vocabulary")
+        
+        cache_key = f"{word}_auto_discovered"
+        if not force and cache_key in self._sense_cache:
+            return self._sense_cache[cache_key]
+        
+        noise = noise_level if noise_level is not None else self.noise_level
+        
+        # X-means: automatically find optimal k
+        anchors, optimal_k = self._discover_anchors_xmeans(word, max_senses, min_senses)
+        
+        if self.verbose:
+            print(f"  [X-MEANS] Auto-discovered {optimal_k} senses for '{word}'")
+        
+        sense_centroids = self._compute_sense_centroids(anchors)
+        
+        if len(sense_centroids) < 2:
+            emb = self._embeddings_norm[word]
+            self._sense_cache[cache_key] = {'default': emb}
+            return {'default': emb}
+        
+        sense_embs = self._simulated_repair(word, sense_centroids, noise)
+        
+        self._sense_cache[cache_key] = sense_embs
+        self._anchor_cache[cache_key] = anchors
+        
+        return sense_embs
     
     def _compute_sense_centroids(self, anchors: Dict[str, List[str]]) -> Dict[str, np.ndarray]:
         """Compute normalized centroid for each sense from anchor words."""
@@ -1056,6 +1261,123 @@ class SenseExplorer:
         self.noise_level = noise_level
         # Clear cache since granularity changed
         self.clear_cache()
+    
+    # =========================================================================
+    # Polarity Methods (97% accuracy)
+    # =========================================================================
+    
+    def get_polarity(
+        self,
+        word: str,
+        positive_seeds: List[str] = None,
+        negative_seeds: List[str] = None
+    ) -> Dict:
+        """
+        Get polarity classification for a word.
+        
+        This is a SUPERVISED method: requires seed words to define
+        the positive/negative poles. Achieves 97% accuracy.
+        
+        Args:
+            word: Target word
+            positive_seeds: Words defining positive pole (default: sentiment words)
+            negative_seeds: Words defining negative pole
+        
+        Returns:
+            Dict with 'polarity', 'score', 'confidence'
+        
+        Example:
+            >>> se.get_polarity("excellent")
+            {'polarity': 'positive', 'score': 0.82, 'confidence': 0.91}
+        """
+        # Lazy import to avoid circular dependency
+        from .polarity import PolarityFinder, DEFAULT_POLARITY_SEEDS
+        
+        # Use cached polarity finder or create new one
+        cache_key = (tuple(positive_seeds) if positive_seeds else None,
+                     tuple(negative_seeds) if negative_seeds else None)
+        
+        if not hasattr(self, '_polarity_finders'):
+            self._polarity_finders = {}
+        
+        if cache_key not in self._polarity_finders:
+            pf = PolarityFinder(
+                self.embeddings,
+                positive_seeds=positive_seeds,
+                negative_seeds=negative_seeds,
+                verbose=False
+            )
+            self._polarity_finders[cache_key] = pf
+        
+        return self._polarity_finders[cache_key].get_polarity(word)
+    
+    def classify_polarity(
+        self,
+        words: List[str],
+        positive_seeds: List[str] = None,
+        negative_seeds: List[str] = None,
+        threshold: float = 0.0
+    ) -> Dict[str, List[str]]:
+        """
+        Classify multiple words by polarity.
+        
+        Args:
+            words: Words to classify
+            positive_seeds: Words defining positive pole
+            negative_seeds: Words defining negative pole
+            threshold: Score threshold (|score| < threshold = neutral)
+        
+        Returns:
+            Dict with 'positive', 'negative', 'neutral' word lists
+        
+        Example:
+            >>> se.classify_polarity(['good', 'bad', 'table'])
+            {'positive': ['good'], 'negative': ['bad'], 'neutral': ['table']}
+        """
+        from .polarity import PolarityFinder
+        
+        pf = PolarityFinder(
+            self.embeddings,
+            positive_seeds=positive_seeds,
+            negative_seeds=negative_seeds,
+            verbose=False
+        )
+        return pf.classify_words(words, threshold=threshold)
+    
+    def get_polarity_finder(
+        self,
+        positive_seeds: List[str] = None,
+        negative_seeds: List[str] = None,
+        domain: str = None
+    ) -> 'PolarityFinder':
+        """
+        Get a PolarityFinder instance for advanced polarity operations.
+        
+        Args:
+            positive_seeds: Custom positive seeds
+            negative_seeds: Custom negative seeds  
+            domain: Predefined domain ('sentiment', 'quality', 'morality',
+                   'health', 'size', 'temperature')
+        
+        Returns:
+            PolarityFinder instance
+        
+        Example:
+            >>> pf = se.get_polarity_finder(domain='quality')
+            >>> pf.most_polar_words(top_k=10)
+        """
+        from .polarity import PolarityFinder, DOMAIN_POLARITY_SEEDS
+        
+        if domain and domain in DOMAIN_POLARITY_SEEDS:
+            positive_seeds = DOMAIN_POLARITY_SEEDS[domain]['positive']
+            negative_seeds = DOMAIN_POLARITY_SEEDS[domain]['negative']
+        
+        return PolarityFinder(
+            self.embeddings,
+            positive_seeds=positive_seeds,
+            negative_seeds=negative_seeds,
+            verbose=self.verbose
+        )
     
     def __repr__(self) -> str:
         return f"SenseExplorer(vocab_size={self.vocab_size:,}, dim={self.dim}, cached_senses={len(self._sense_cache)})"
