@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script for SenseInduction package.
+Setup script for SenseExplorer package.
 """
 
 from setuptools import setup, find_packages
@@ -9,14 +9,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="sense-inductor",
-    version="0.3.0",
+    name="sense-explorer",
+    version="0.4.0",
     author="Kow Kuroda & Claude",
     author_email="kow.k@ks.kyorin-u.ac.jp",
-    description="Sense induction via simulated self-repair in word embeddings",
+    description="From sense discovery to sense induction via simulated self-repair",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/kow-k/sense-inductor",
+    url="https://github.com/kow-k/sense-explorer",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -46,12 +46,13 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "sense-induction=sense_induction.core:main",
+            "sense-explorer=sense_explorer.core:main",
         ],
     },
     keywords=[
         "word-embeddings",
         "word-sense-induction",
+        "word-sense-discovery",
         "word-sense-disambiguation",
         "polysemy",
         "nlp",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hybrid Anchor Extraction for Sense Induction
+Hybrid Anchor Extraction for Sense Exploration
 =============================================
 
 Combines multiple strategies for automatic anchor word extraction:
