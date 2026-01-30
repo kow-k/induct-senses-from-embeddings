@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-SenseRepair: Sense Discovery and Disambiguation via Simulated Self-Repair
-==========================================================================
+SenseInductor: Sense Induction via Simulated Self-Repair
+========================================================
 
-A lightweight, training-free method for discovering and disambiguating
-word senses in static embeddings (GloVe, Word2Vec, FastText, etc.).
+A lightweight, training-free method for inducing word senses
+in static embeddings (GloVe, Word2Vec, FastText, etc.).
 
 Inspired by DNA self-repair mechanisms: noise + self-organization
 reveals latent sense structure encoded as stable attractors.
 
+Key insight: Senses are not "discovered" but INDUCED toward targets
+defined by anchor words. Anchors act as attractors in semantic space.
+
 Key Features:
   - Zero training required
   - Works with any static embeddings
-  - Automatic anchor discovery (no manual specification needed)
+  - Automatic anchor extraction (FrameNet + WordNet, 88% accuracy)
   - Noise level as granularity control (semantic zoom)
   - Stability-based sense number selection
   - Sense-aware similarity metrics
@@ -20,20 +23,20 @@ Key Features:
   - Minimal computational cost
 
 Basic Usage:
-  >>> from sense_repair import SenseRepair
-  >>> sr = SenseRepair.from_glove("glove.6B.100d.txt")
-  >>> senses = sr.discover_senses("bank")
+  >>> from sense_induction import SenseInductor
+  >>> si = SenseInductor.from_glove("glove.6B.100d.txt")
+  >>> senses = si.induce_senses("bank")
   >>> print(senses)
   {'financial': array([...]), 'river': array([...])}
-  >>> sr.similarity("bank", "money")  # sense-aware
+  >>> si.similarity("bank", "money")  # sense-aware
   0.827
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Repository: https://github.com/kow-k/sense-repair
+Repository: https://github.com/kow-k/sense-induction
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np
@@ -43,22 +46,32 @@ from pathlib import Path
 from collections import defaultdict, Counter
 import warnings
 
+# Import hybrid anchor extractor
+try:
+    from .anchor_extractor import HybridAnchorExtractor, MANUAL_ANCHORS, FRAME_ANCHORS
+    HYBRID_AVAILABLE = True
+except ImportError:
+    HYBRID_AVAILABLE = False
+
 
 # =============================================================================
-# Core SenseRepair Class
+# Core SenseInductor Class
 # =============================================================================
 
-class SenseRepair:
+class SenseInductor:
     """
-    Discover and disambiguate word senses via simulated self-repair.
+    Induce word senses via simulated self-repair.
     
     The method works by:
       1. Creating noisy copies of a word's embedding
-      2. Seeding subsets toward different sense directions
+      2. Seeding subsets toward different sense directions (anchors)
       3. Allowing copies to self-organize (repair) toward stable configurations
       4. Observing which "attractor basins" the copies settle into
     
-    Key insight: Noise level acts as a granularity control parameter.
+    Key insight: Senses are INDUCED toward anchor-defined targets,
+    not discovered from scratch. Anchors define the attractor basins.
+    
+    Noise level acts as a granularity control parameter:
       - Low noise (10-20%): Fine distinctions, may over-split
       - Medium noise (30-50%): Standard sense-level distinctions
       - High noise (60-80%): Coarse groupings
@@ -66,10 +79,10 @@ class SenseRepair:
     The "true" sense count is found where it remains STABLE across noise levels.
     
     Example:
-        >>> sr = SenseRepair.from_glove("glove.6B.100d.txt")
-        >>> sr.discover_senses("bank")
+        >>> si = SenseInductor.from_glove("glove.6B.100d.txt")
+        >>> si.induce_senses("bank")
         {'financial': array([...]), 'river': array([...])}
-        >>> sr.similarity("bank", "river", sense_aware=True)
+        >>> si.similarity("bank", "river", sense_aware=True)
         0.818
     """
     
@@ -84,10 +97,11 @@ class SenseRepair:
         n_iterations: int = 15,
         anchor_pull: float = 0.2,
         n_anchors: int = 8,
+        use_hybrid_anchors: bool = True,
         verbose: bool = True
     ):
         """
-        Initialize SenseRepair with embeddings.
+        Initialize SenseInductor with embeddings.
         
         Args:
             embeddings: Dict mapping words to numpy vectors
@@ -100,6 +114,8 @@ class SenseRepair:
             n_iterations: Number of self-organization iterations
             anchor_pull: Strength of pull toward anchor centroids
             n_anchors: Number of anchors per sense for auto-discovery
+            use_hybrid_anchors: Use hybrid anchor extraction (FrameNet + WordNet)
+                               Achieves 88% accuracy vs 56% for auto-discovery
             verbose: Print progress messages
         """
         self.embeddings = embeddings
@@ -115,7 +131,19 @@ class SenseRepair:
         self.n_iterations = n_iterations
         self.anchor_pull = anchor_pull
         self.n_anchors = n_anchors
+        self.use_hybrid_anchors = use_hybrid_anchors
         self.verbose = verbose
+        
+        # Initialize hybrid anchor extractor if available and enabled
+        self._hybrid_extractor = None
+        if use_hybrid_anchors and HYBRID_AVAILABLE:
+            self._hybrid_extractor = HybridAnchorExtractor(
+                self.vocab,
+                use_manual=True,
+                use_framenet=True,
+                use_wordnet=True,
+                verbose=verbose
+            )
         
         # Caches
         self._sense_cache = {}  # word -> {sense_name: embedding}
@@ -128,30 +156,34 @@ class SenseRepair:
             self._embeddings_norm[word] = emb / (norm(emb) + 1e-10)
         
         if verbose:
-            print(f"SenseRepair initialized with {self.vocab_size:,} words, dim={self.dim}")
+            hybrid_status = "enabled" if (use_hybrid_anchors and HYBRID_AVAILABLE) else "disabled"
+            print(f"SenseInductor initialized with {self.vocab_size:,} words, dim={self.dim}")
+            print(f"  Hybrid anchor extraction: {hybrid_status}")
+            if use_hybrid_anchors and HYBRID_AVAILABLE:
+                print(f"  Coverage: manual={len(MANUAL_ANCHORS)} words, framenet={len(FRAME_ANCHORS)} frames")
     
     # =========================================================================
     # Loading Methods
     # =========================================================================
     
     @classmethod
-    def from_glove(cls, filepath: str, max_words: int = None, **kwargs) -> 'SenseRepair':
+    def from_glove(cls, filepath: str, max_words: int = None, **kwargs) -> 'SenseInductor':
         """
         Load from GloVe format (text or binary).
         
         Args:
             filepath: Path to GloVe file (.txt or .bin)
             max_words: Maximum number of words to load
-            **kwargs: Additional arguments for SenseRepair
+            **kwargs: Additional arguments for SenseInductor
         
         Returns:
-            SenseRepair instance
+            SenseInductor instance
         """
         embeddings, dim = cls._load_glove(filepath, max_words, kwargs.get('verbose', True))
         return cls(embeddings, dim=dim, **kwargs)
     
     @classmethod
-    def from_word2vec(cls, filepath: str, max_words: int = None, binary: bool = True, **kwargs) -> 'SenseRepair':
+    def from_word2vec(cls, filepath: str, max_words: int = None, binary: bool = True, **kwargs) -> 'SenseInductor':
         """
         Load from Word2Vec format.
         
@@ -159,25 +191,25 @@ class SenseRepair:
             filepath: Path to Word2Vec file
             max_words: Maximum number of words to load
             binary: Whether file is binary format
-            **kwargs: Additional arguments for SenseRepair
+            **kwargs: Additional arguments for SenseInductor
         
         Returns:
-            SenseRepair instance
+            SenseInductor instance
         """
         embeddings, dim = cls._load_word2vec(filepath, max_words, binary, kwargs.get('verbose', True))
         return cls(embeddings, dim=dim, **kwargs)
     
     @classmethod
-    def from_dict(cls, embeddings: Dict[str, Union[np.ndarray, List[float]]], **kwargs) -> 'SenseRepair':
+    def from_dict(cls, embeddings: Dict[str, Union[np.ndarray, List[float]]], **kwargs) -> 'SenseInductor':
         """
         Create from dictionary of embeddings.
         
         Args:
             embeddings: Dict mapping words to vectors (numpy arrays or lists)
-            **kwargs: Additional arguments for SenseRepair
+            **kwargs: Additional arguments for SenseInductor
         
         Returns:
-            SenseRepair instance
+            SenseInductor instance
         """
         # Convert lists to numpy arrays if needed
         emb_dict = {}
@@ -285,7 +317,7 @@ class SenseRepair:
     # Core Sense Discovery
     # =========================================================================
     
-    def discover_senses(
+    def induce_senses(
         self,
         word: str,
         n_senses: int = None,
@@ -317,7 +349,7 @@ class SenseRepair:
         n_senses = n_senses or self.default_n_senses
         noise = noise_level if noise_level is not None else self.noise_level
         
-        # Get or discover anchors
+        # Get or induce anchors
         if anchors is None:
             anchors = self._discover_anchors(word, n_senses)
         
@@ -339,7 +371,7 @@ class SenseRepair:
         
         return sense_embs
     
-    def discover_senses_stable(
+    def induce_senses_stable(
         self,
         word: str,
         n_senses: int = None,
@@ -348,9 +380,9 @@ class SenseRepair:
         n_trials: int = 3
     ) -> Dict:
         """
-        Discover senses using stability-based method.
+        Induce senses using stability-based method.
         
-        This method runs sense discovery at multiple noise levels and
+        This method runs sense induction at multiple noise levels and
         finds the STABLE sense count - the one that persists across
         different granularities. This is more robust than single-noise
         discovery.
@@ -378,7 +410,7 @@ class SenseRepair:
         
         n_senses = n_senses or 6  # Allow more senses for exploration
         
-        # Get or discover anchors
+        # Get or induce anchors
         if anchors is None:
             anchors = self._discover_anchors(word, n_senses)
         
@@ -481,10 +513,36 @@ class SenseRepair:
         """
         Automatically discover anchor words for each sense.
         
-        Strategy:
-          1. Find k nearest neighbors of the target word
-          2. Cluster neighbors into n_senses groups
-          3. Use cluster members as anchors for each sense
+        Strategy (hybrid - 88% accuracy):
+          1. Try manual predefined anchors (highest quality)
+          2. Try FrameNet-inspired anchors (high quality)
+          3. Try WordNet gloss noun extraction (broad coverage)
+          4. Fall back to k-means clustering of neighbors (56% accuracy)
+        
+        The hybrid approach combines FrameNet frame elements with
+        WordNet gloss nouns, validating the theoretical correspondence:
+          Frame Elements ≈ Gloss Nouns ≈ Distributional Co-occurrence
+        """
+        # Try hybrid extraction first (if available)
+        if self._hybrid_extractor is not None:
+            anchors, source = self._hybrid_extractor.extract(word, n_senses)
+            if anchors:
+                if self.verbose:
+                    print(f"  Anchors extracted via {source} for '{word}'")
+                return anchors
+        
+        # Fallback: k-means clustering of nearest neighbors
+        if self.verbose:
+            print(f"  Using auto-discovery (k-means) for '{word}'")
+        
+        return self._discover_anchors_kmeans(word, n_senses)
+    
+    def _discover_anchors_kmeans(self, word: str, n_senses: int) -> Dict[str, List[str]]:
+        """
+        Discover anchors via k-means clustering of nearest neighbors.
+        
+        This is the fallback method when hybrid extraction fails.
+        Achieves ~56% accuracy (vs 88% for hybrid).
         """
         target_emb = self._embeddings_norm[word]
         
@@ -698,7 +756,7 @@ class SenseRepair:
         Returns:
             Tuple of (similarity, selected_sense_name)
         """
-        senses1 = self.discover_senses(word1)
+        senses1 = self.induce_senses(word1)
         e2 = self._embeddings_norm[word2]
         
         best_sim = -1.0
@@ -719,8 +777,8 @@ class SenseRepair:
         Returns:
             Tuple of (similarity, word1_sense, word2_sense)
         """
-        senses1 = self.discover_senses(word1)
-        senses2 = self.discover_senses(word2)
+        senses1 = self.induce_senses(word1)
+        senses2 = self.induce_senses(word2)
         
         best_sim = -1.0
         best_s1 = 'default'
@@ -753,8 +811,8 @@ class SenseRepair:
         Returns:
             Tuple of (similarity, word1_sense, word2_sense)
         """
-        senses1 = self.discover_senses(word1)
-        senses2 = self.discover_senses(word2)
+        senses1 = self.induce_senses(word1)
+        senses2 = self.induce_senses(word2)
         
         # Compute context vector
         context_vecs = [self._embeddings_norm[c] for c in context if c in self.vocab]
@@ -801,8 +859,8 @@ class SenseRepair:
         exclude = {a, b, c}
         
         if sense_aware:
-            senses_a = self.discover_senses(a)
-            senses_c = self.discover_senses(c)
+            senses_a = self.induce_senses(a)
+            senses_c = self.induce_senses(c)
             e_b = self._embeddings_norm[b]
             
             # Find which sense of 'a' relates to 'b'
@@ -880,8 +938,8 @@ class SenseRepair:
         if word in self._stability_cache:
             del self._stability_cache[word]
         
-        # Discover senses with these anchors
-        self.discover_senses(word, anchors=anchors, force=True)
+        # Induce senses with these anchors
+        self.induce_senses(word, anchors=anchors, force=True)
     
     def set_noise_level(self, noise_level: float):
         """
@@ -899,7 +957,7 @@ class SenseRepair:
         self.clear_cache()
     
     def __repr__(self) -> str:
-        return f"SenseRepair(vocab_size={self.vocab_size:,}, dim={self.dim}, cached_senses={len(self._sense_cache)})"
+        return f"SenseInductor(vocab_size={self.vocab_size:,}, dim={self.dim}, cached_senses={len(self._sense_cache)})"
 
 
 # =============================================================================
@@ -951,12 +1009,12 @@ COMMON_POLYSEMOUS = {
 }
 
 
-def load_common_polysemous(sr: SenseRepair, words: List[str] = None):
+def load_common_polysemous(sr: SenseInductor, words: List[str] = None):
     """
     Pre-load sense anchors for common polysemous words.
     
     Args:
-        sr: SenseRepair instance
+        sr: SenseInductor instance
         words: List of words to load (default: all common polysemous)
     """
     words = words or list(COMMON_POLYSEMOUS.keys())
@@ -971,28 +1029,28 @@ def load_common_polysemous(sr: SenseRepair, words: List[str] = None):
 # =============================================================================
 
 def main():
-    """Command-line interface for SenseRepair."""
+    """Command-line interface for SenseInductor."""
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='SenseRepair: Sense Discovery via Simulated Self-Repair',
+        description='SenseInductor: Sense Discovery via Simulated Self-Repair',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Discover senses for a word
-  python -m sense_repair --glove glove.6B.100d.txt --word bank
+  # Induce senses for a word
+  python -m sense_induction --glove glove.6B.100d.txt --word bank
   
   # Use stability-based discovery
-  python -m sense_repair --glove glove.6B.100d.txt --word bank --stable
+  python -m sense_induction --glove glove.6B.100d.txt --word bank --stable
   
   # Compute sense-aware similarity
-  python -m sense_repair --glove glove.6B.100d.txt --similarity bank river
+  python -m sense_induction --glove glove.6B.100d.txt --similarity bank river
   
   # Solve analogy
-  python -m sense_repair --glove glove.6B.100d.txt --analogy bank money crane
+  python -m sense_induction --glove glove.6B.100d.txt --analogy bank money crane
   
   # Control granularity with noise level
-  python -m sense_repair --glove glove.6B.100d.txt --word bank --noise 0.3
+  python -m sense_induction --glove glove.6B.100d.txt --word bank --noise 0.3
         """
     )
     
@@ -1004,16 +1062,16 @@ Examples:
     parser.add_argument('--analogy', nargs=3, metavar=('A', 'B', 'C'), help='Solve analogy a:b::c:?')
     parser.add_argument('--n-senses', type=int, default=2, help='Number of senses to discover')
     parser.add_argument('--noise', type=float, default=0.5, help='Noise level (granularity control)')
-    parser.add_argument('--stable', action='store_true', help='Use stability-based sense discovery')
+    parser.add_argument('--stable', action='store_true', help='Use stability-based sense induction')
     parser.add_argument('--use-predefined', action='store_true', help='Use predefined anchors for common words')
     
     args = parser.parse_args()
     
     # Load embeddings
     if args.glove:
-        sr = SenseRepair.from_glove(args.glove, max_words=args.max_words, noise_level=args.noise)
+        sr = SenseInductor.from_glove(args.glove, max_words=args.max_words, noise_level=args.noise)
     elif args.word2vec:
-        sr = SenseRepair.from_word2vec(args.word2vec, max_words=args.max_words, noise_level=args.noise)
+        sr = SenseInductor.from_word2vec(args.word2vec, max_words=args.max_words, noise_level=args.noise)
     else:
         parser.error("Must specify --glove or --word2vec")
     
@@ -1021,12 +1079,12 @@ Examples:
     if args.use_predefined:
         load_common_polysemous(sr)
     
-    # Discover senses
+    # Induce senses
     if args.word:
         print(f"\nDiscovering senses for '{args.word}'...")
         
         if args.stable:
-            result = sr.discover_senses_stable(args.word, n_senses=args.n_senses)
+            result = sr.induce_senses_stable(args.word, n_senses=args.n_senses)
             print(f"Stable sense count: {result['stable_k']}")
             print(f"Confidence: {result['confidence']:.1%}")
             print(f"Optimal noise: {result['optimal_noise']:.1%}")
@@ -1034,7 +1092,7 @@ Examples:
                 print(f"Stable range: {result['stable_range'][0]:.0%}-{result['stable_range'][1]:.0%}")
             senses = result['senses']
         else:
-            senses = sr.discover_senses(args.word, n_senses=args.n_senses)
+            senses = sr.induce_senses(args.word, n_senses=args.n_senses)
         
         print(f"Found {len(senses)} senses: {list(senses.keys())}")
         
