@@ -187,5 +187,5 @@ outdated/
 *.zip
 *.txt
 *.py
-!sense_explorer
+!sense_explorer/
 !setup.py
