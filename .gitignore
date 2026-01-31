@@ -186,4 +186,5 @@ cython_debug/
 outdated/
 *.zip
 *.txt
+#*.py # This hurts
 tester*.py
