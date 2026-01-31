@@ -186,6 +186,4 @@ cython_debug/
 outdated/
 *.zip
 *.txt
-*.py
-!sense_explorer/
-!setup.py
+tester*.py
