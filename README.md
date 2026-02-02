@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.8.0-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.9.0-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
@@ -23,7 +23,7 @@ The self-repair algorithm does not sample the embedding space—it **follows att
 - Random anchors yield separated but **semantically wrong** senses (100% separation, 6.4% alignment)
 - Good anchors yield both separation **and** correctness (100% separation, 99.9% alignment)
 
-## Three Capabilities
+## Four Capabilities
 
 | Capability | Method | Supervision | Accuracy |
 |------------|--------|-------------|----------|
@@ -31,8 +31,16 @@ The self-repair algorithm does not sample the embedding space—it **follows att
 | **Sense Discovery (Auto)** | `discover_senses_auto()` | Unsupervised + Parameter-free | 90% (spectral) |
 | **Sense Induction** | `induce_senses()` | Weakly supervised | 88% |
 | **Polarity Classification** | `get_polarity()` | Supervised | 97% |
+| **Sense Geometry** | `localize_senses()` | Post-analysis | — |
 
-**What's new in v0.8.0**:
+**What's new in v0.9.0**:
+- **Sense geometry analysis**: `localize_senses()` decomposes word vectors into sense components and reveals the molecular-like angular structure of polysemous embeddings
+- **`SenseDecomposition` dataclass**: Rich result object with angles, coefficients, R², dimensional territories, and interference patterns
+- **Molecular diagrams**: Publication-quality visualizations of sense geometry
+- **Batch analysis**: `analyze_geometry()` runs cross-word comparisons with automatic statistical summaries
+- **Key finding**: Inter-sense angles cluster at ~48° (median, 100d), formally analogous to molecular bond geometry
+
+**What was new in v0.8.0**:
 - **Attractor-following insight**: Anchor quality, not N, determines sense correctness
 - **Anchor validation** (`_validate_anchors()`): Warns before bad anchors silently produce wrong senses
 - **n_copies default reduced** from 100 → 30 (~70% computation savings, no accuracy loss)
@@ -141,6 +149,65 @@ pf.find_polar_opposites("happy")
 | `size` | big, large, huge | small, tiny, little |
 | `temperature` | hot, warm | cold, freezing |
 
+## Sense Geometry Analysis (NEW in v0.9.0)
+
+Analyze the geometric structure of separated senses — how sense vectors are arranged around a polysemous word vector:
+
+```python
+# Single word: decompose and analyze
+decomp = se.localize_senses("bank")
+print(f"R² = {decomp.variance_explained_total:.3f}")
+print(f"Dominant sense: {decomp.dominant_sense}")
+print(f"Coefficient ratio: {decomp.coefficient_ratio:.1f}:1")
+
+# Inter-sense angles
+for s1, s2, angle in decomp.angle_pairs:
+    print(f"  ∠({s1}, {s2}) = {angle:.1f}°")
+
+# JSON-serializable summary
+print(decomp.summary_dict())
+
+# Batch analysis across multiple words
+results = se.analyze_geometry(
+    ["bank", "cell", "run", "take"],
+    save_dir="geometry_output"  # Saves dashboards + summary plots
+)
+
+# Work with pre-extracted sense vectors
+from sense_explorer.geometry import decompose
+decomp = decompose("bank", word_vec, {"financial": vec1, "river": vec2})
+```
+
+### Key Finding: Molecular Bond Analogy
+
+Inter-sense angles cluster around a **characteristic scale** (~48° median at 100d), analogous to molecular bond angles:
+
+| Relationship | Typical angle |
+|---|---|
+| Synonyms / same-sense words | < 30° |
+| **Different senses of the same word** | **~35–55° (median ~48°)** |
+| Unrelated words | ~90° |
+
+This arises from a **force balance**: context distinctness pushes senses apart (like electron repulsion), while word identity pulls them together (like covalent attraction). The ~48° equilibrium is to distributional semantics what 109.5° is to carbon chemistry.
+
+### Visualizations
+
+`localize_senses()` and `analyze_geometry()` can generate:
+- **Molecular diagrams**: Sense vectors radiating from the word vector at true angles
+- **Dimension attribution maps**: Which sense "owns" each embedding dimension
+- **Interference heatmaps**: Constructive vs. destructive sense interaction
+- **Cross-word comparison grids**: Side-by-side geometry across words
+- **Angle summary bar charts**: All inter-sense angles at a glance
+
+```python
+# Save a full dashboard for one word
+from sense_explorer.geometry import plot_word_dashboard
+plot_word_dashboard(decomp, "bank_dashboard.png")
+
+# Or save everything at once
+results = se.analyze_geometry(["bank", "cell", "run"], save_dir="output/")
+```
+
 ## The Three Modes Explained
 
 ### 1. Unsupervised Discovery (`discover_senses`)
@@ -227,13 +294,13 @@ polarity = se.get_polarity("terrible")
 ### The Supervision Spectrum
 
 ```
-Fully Unsupervised    Weakly Supervised    Fully Supervised
-       │                     │                    │
-  discover_senses()    induce_senses()     get_polarity()
-  discover_senses_auto()
-       │                     │                    │
-   No targets          Anchor targets        Seed labels
-   90% accuracy        88% accuracy          97% accuracy
+Fully Unsupervised    Weakly Supervised    Fully Supervised    Post-Analysis
+       │                     │                    │                  │
+  discover_senses()    induce_senses()     get_polarity()   localize_senses()
+  discover_senses_auto()                                    analyze_geometry()
+       │                     │                    │                  │
+   No targets          Anchor targets        Seed labels     Sense vectors →
+   90% accuracy        88% accuracy          97% accuracy    Geometry analysis
    (spectral)
        │
   Eigengap: auto k
@@ -301,6 +368,8 @@ SenseExplorer(
 | `discover_senses(word, n_senses)` | Unsupervised | Sense discovery (spectral default) |
 | `discover_senses_auto(word)` | Unsupervised | Parameter-free discovery (eigengap) |
 | `induce_senses(word)` | Weakly supervised | Anchor-guided induction |
+| `localize_senses(word)` | Geometry | Decompose word vector into sense components |
+| `analyze_geometry(words)` | Geometry | Batch cross-word geometry analysis |
 | `_validate_anchors(word, anchors)` | Diagnostic | Check anchor quality before induction |
 | `explore_senses(word, mode)` | Auto | Convenience wrapper |
 | `get_polarity(word)` | Supervised | Polarity classification |
@@ -351,8 +420,40 @@ pf.set_domain('quality')        # Switch domain
 pf.evaluate_accuracy(pos, neg)  # Test accuracy
 ```
 
+### Sense Geometry
+
+```python
+from sense_explorer.geometry import (
+    decompose,
+    SenseDecomposition,
+    collect_all_angles,
+    plot_word_dashboard,
+    plot_molecular_diagram,
+    plot_cross_word_comparison,
+    plot_angle_summary,
+)
+
+# Standalone decomposition (no SenseExplorer needed)
+decomp = decompose("bank", word_vector, {"financial": vec1, "river": vec2})
+decomp.variance_explained_total   # R²
+decomp.coefficients               # Mixing weights α
+decomp.angle_pairs                # [(label_i, label_j, angle°), ...]
+decomp.coefficient_ratio          # max(|α|) / min(|α|)
+decomp.dominant_sense             # Label of strongest sense
+decomp.summary_dict()             # JSON-serializable summary
+
+# Cross-word utilities
+all_angles = collect_all_angles([decomp1, decomp2, decomp3])
+
+# Visualization (requires matplotlib + scikit-learn)
+plot_word_dashboard(decomp, "bank_dashboard.png")
+plot_cross_word_comparison([decomp1, decomp2], "comparison.png")
+plot_angle_summary([decomp1, decomp2, decomp3], "angles.png")
+```
+
 ## Version History
 
+- **v0.9.0**: Sense geometry module (`localize_senses`, `analyze_geometry`), `SenseDecomposition` dataclass, molecular diagrams, cross-word batch analysis
 - **v0.8.0**: Attractor-following insight, anchor validation, n_copies 100→30, vectorized self-repair, `assess_quality()`
 - **v0.7.0**: Spectral clustering default (90% at 50d), eigengap k selection, `clustering_method` parameter
 - **v0.6.0**: X-means for auto k, sense-loyal induction fix, dimensional recovery experiments

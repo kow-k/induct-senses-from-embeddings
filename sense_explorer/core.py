@@ -34,7 +34,7 @@ License: MIT
 Repository: https://github.com/kow-k/sense-explorer
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np
@@ -61,6 +61,22 @@ try:
     SPECTRAL_AVAILABLE = True
 except ImportError:
     SPECTRAL_AVAILABLE = False
+
+# Import geometry module
+try:
+    from .geometry import (
+        SenseDecomposition,
+        decompose as _decompose_geometry,
+        print_report as _print_geometry_report,
+        print_cross_word_summary as _print_geometry_summary,
+        collect_all_angles,
+        plot_word_dashboard,
+        plot_cross_word_comparison,
+        plot_angle_summary,
+    )
+    GEOMETRY_AVAILABLE = True
+except ImportError:
+    GEOMETRY_AVAILABLE = False
 
 
 # =============================================================================
@@ -578,7 +594,182 @@ class SenseExplorer:
             print(f"  Falling back to k-means for '{word}'")
         return self._discover_anchors_kmeans(word, n_senses)
 
+    # =========================================================================
+    # Sense Geometry Analysis
+    # =========================================================================
+
+    def localize_senses(
+        self,
+        word: str,
+        senses: Dict[str, np.ndarray] = None,
+        mode: str = 'induce',
+        force: bool = False,
+        **kwargs
+    ) -> 'SenseDecomposition':
+        """
+        Decompose a word vector into its sense components and analyze
+        the geometric relationships between senses.
+
+        This performs the linear decomposition:
+            w ≈ α₁s₁ + α₂s₂ + ... + αₖsₖ + ε
+
+        and computes inter-sense angles, coefficients, dimensional
+        territories, and interference patterns.
+
+        Args:
+            word: Target polysemous word
+            senses: Pre-extracted sense vectors {label: vector}.
+                    If None, senses are extracted via `mode`.
+            mode: How to obtain senses if not provided:
+                  'induce' (default): weakly supervised via anchors
+                  'discover': unsupervised spectral clustering
+                  'discover_auto': unsupervised + auto k
+            force: Force re-extraction even if cached
+            **kwargs: Passed to the sense extraction method
+
+        Returns:
+            SenseDecomposition with full geometric analysis
+
+        Raises:
+            ImportError: If geometry module is not available
+            ValueError: If word not in vocabulary or < 2 senses found
+
+        Example:
+            >>> se = SenseExplorer.from_glove("glove.6B.100d.txt")
+            >>> decomp = se.localize_senses("bank")
+            >>> print(f"R² = {decomp.variance_explained_total:.3f}")
+            >>> for s1, s2, angle in decomp.angle_pairs:
+            ...     print(f"  ∠({s1}, {s2}) = {angle:.1f}°")
+        """
+        if not GEOMETRY_AVAILABLE:
+            raise ImportError(
+                "Geometry module not available. Ensure geometry.py is in "
+                "the sense_explorer package directory."
+            )
+
+        if word not in self.vocab:
+            raise ValueError(f"Word '{word}' not in vocabulary")
+
+        # Obtain sense vectors
+        if senses is None:
+            if mode == 'induce':
+                senses = self.induce_senses(word, force=force, **kwargs)
+            elif mode == 'discover':
+                senses = self.discover_senses(word, force=force, **kwargs)
+            elif mode == 'discover_auto':
+                senses = self.discover_senses_auto(word, force=force, **kwargs)
+            else:
+                raise ValueError(
+                    f"Unknown mode '{mode}'. "
+                    "Use 'induce', 'discover', or 'discover_auto'."
+                )
+
+        if len(senses) < 2:
+            raise ValueError(
+                f"Need at least 2 senses for geometry analysis, "
+                f"got {len(senses)} for '{word}'."
+            )
+
+        decomp = _decompose_geometry(word, self.embeddings[word], senses)
+
+        if self.verbose:
+            _print_geometry_report(decomp)
+
+        return decomp
+
+    def analyze_geometry(
+        self,
+        words: List[str],
+        mode: str = 'induce',
+        save_dir: str = None,
+        verbose: bool = None,
+        **kwargs
+    ) -> List['SenseDecomposition']:
+        """
+        Run sense geometry analysis across multiple words.
+
+        For each word, extracts senses and decomposes the word vector,
+        then prints cross-word statistical summaries and optionally
+        saves visualizations.
+
+        Args:
+            words: List of polysemous words to analyze
+            mode: Sense extraction mode ('induce', 'discover', 'discover_auto')
+            save_dir: If provided, save dashboards and summary plots here
+            verbose: Override instance verbose setting
+            **kwargs: Passed to localize_senses()
+
+        Returns:
+            List of SenseDecomposition objects
+
+        Example:
+            >>> results = se.analyze_geometry(
+            ...     ["bank", "cell", "run"],
+            ...     save_dir="geometry_output"
+            ... )
+            >>> # Access cross-word angle statistics
+            >>> from sense_explorer.geometry import collect_all_angles
+            >>> angles = collect_all_angles(results)
+        """
+        if not GEOMETRY_AVAILABLE:
+            raise ImportError(
+                "Geometry module not available. Ensure geometry.py is in "
+                "the sense_explorer package directory."
+            )
+
+        v = verbose if verbose is not None else self.verbose
+        old_verbose = self.verbose
+        self.verbose = False  # Suppress per-word chatter during batch
+
+        decompositions = []
+        for word in words:
+            if word not in self.vocab:
+                if v:
+                    print(f"  WARNING: '{word}' not in vocabulary, skipping")
+                continue
+            try:
+                decomp = self.localize_senses(word, mode=mode, **kwargs)
+                decompositions.append(decomp)
+            except ValueError as e:
+                if v:
+                    print(f"  WARNING: {e}")
+
+        self.verbose = old_verbose
+
+        if not decompositions:
+            if v:
+                print("No successful decompositions.")
+            return []
+
+        # Print cross-word summary
+        if v:
+            _print_geometry_summary(decompositions)
+
+        # Save visualizations if requested
+        if save_dir is not None:
+            import os
+            os.makedirs(save_dir, exist_ok=True)
+
+            for decomp in decompositions:
+                path = os.path.join(save_dir, f'dashboard_{decomp.word}.png')
+                plot_word_dashboard(decomp, path)
+                if v:
+                    print(f"  Saved: {path}")
+
+            path = os.path.join(save_dir, 'cross_word_comparison.png')
+            plot_cross_word_comparison(decompositions, path)
+            if v:
+                print(f"  Saved: {path}")
+
+            path = os.path.join(save_dir, 'angle_summary.png')
+            plot_angle_summary(decompositions, path)
+            if v:
+                print(f"  Saved: {path}")
+
+        return decompositions
+
     def induce_senses_stable(
+
         self,
         word: str,
         n_senses: int = None,

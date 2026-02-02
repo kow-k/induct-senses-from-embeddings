@@ -10,10 +10,11 @@ space-sampling. Anchor centroids define deterministic attractors—success
 depends on anchor quality, not the number of noisy copies (N). Even N=3
 achieves perfect separation when anchors are good.
 
-Three capabilities:
+Four capabilities:
   - discover_senses(): Unsupervised - spectral clustering (90% at 50d)
   - induce_senses():   Weakly supervised - anchor-guided (88% accuracy)
   - find_polarity():   Supervised - polarity classification (97% accuracy)
+  - localize_senses(): Geometric analysis of separated senses
 
 Basic Usage:
     >>> from sense_explorer import SenseExplorer
@@ -28,9 +29,13 @@ Basic Usage:
     # Polarity classification (97% accuracy)
     >>> polarity = se.get_polarity("excellent")
 
+    # Sense geometry analysis (molecular bond analogy)
+    >>> decomp = se.localize_senses("bank")
+    >>> print(decomp.angle_pairs)  # Inter-sense angles
+
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.8.0
+Version: 0.9.0
 """
 
 from .core import (
@@ -63,7 +68,19 @@ from .spectral import (
     find_k_by_eigengap
 )
 
-__version__ = "0.8.0"
+from .geometry import (
+    SenseDecomposition,
+    decompose,
+    print_report,
+    print_cross_word_summary,
+    collect_all_angles,
+    plot_word_dashboard,
+    plot_molecular_diagram,
+    plot_cross_word_comparison,
+    plot_angle_summary,
+)
+
+__version__ = "0.9.0"
 __author__ = "Kow Kuroda & Claude"
 __all__ = [
     # Core
@@ -87,5 +104,15 @@ __all__ = [
     'spectral_clustering',
     'discover_anchors_spectral',
     'discover_anchors_spectral_fixed_k',
-    'find_k_by_eigengap'
+    'find_k_by_eigengap',
+    # Geometry
+    'SenseDecomposition',
+    'decompose',
+    'print_report',
+    'print_cross_word_summary',
+    'collect_all_angles',
+    'plot_word_dashboard',
+    'plot_molecular_diagram',
+    'plot_cross_word_comparison',
+    'plot_angle_summary',
 ]
