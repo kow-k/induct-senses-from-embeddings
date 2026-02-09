@@ -301,9 +301,113 @@ class SenseExplorer:
         
         return cls(emb_dict, **kwargs)
     
+    @classmethod
+    def from_file(cls, filepath: str, max_words: int = None, **kwargs) -> 'SenseExplorer':
+        """
+        Auto-detect format and load embeddings.
+
+        Supported formats:
+          - .txt: GloVe text format
+          - .txt.gz / .gz: Gzipped GloVe text format
+          - .bin: Gensim KeyedVectors or Word2Vec binary
+          - .model: Gensim native saved model
+
+        Args:
+            filepath: Path to embedding file
+            max_words: Maximum number of words to load
+            **kwargs: Additional arguments for SenseExplorer
+
+        Returns:
+            SenseExplorer instance
+        """
+        import os
+        ext = os.path.splitext(filepath)[1].lower()
+
+        if ext == '.gz':
+            # Peek to determine if gzipped text or gzipped binary
+            import gzip as _gzip
+            with _gzip.open(filepath, 'rb') as f:
+                sample = f.read(100)
+            try:
+                sample.decode('utf-8')
+                # Valid UTF-8 — gzipped GloVe text
+                embeddings, dim = cls._load_glove(filepath, max_words,
+                                                  kwargs.get('verbose', True))
+            except UnicodeDecodeError:
+                # Binary data — gzipped word2vec binary
+                embeddings, dim = cls._load_gensim_model(filepath, max_words,
+                                                         kwargs.get('verbose', True))
+            return cls(embeddings, dim=dim, **kwargs)
+        elif ext == '.model':
+            # Gensim native format
+            embeddings, dim = cls._load_gensim_model(filepath, max_words,
+                                                     kwargs.get('verbose', True))
+            return cls(embeddings, dim=dim, **kwargs)
+        elif ext == '.bin':
+            # Try Gensim/Word2Vec binary first, fall back to GloVe binary
+            try:
+                embeddings, dim = cls._load_gensim_model(filepath, max_words,
+                                                         kwargs.get('verbose', True))
+            except Exception:
+                embeddings, dim = cls._load_glove(filepath, max_words,
+                                                  kwargs.get('verbose', True))
+            return cls(embeddings, dim=dim, **kwargs)
+        elif ext == '.npy':
+            raise ValueError(
+                f"Cannot load .npy directly. Use the .model file instead: "
+                f"{filepath.replace('.vectors.npy', '')}")
+        else:
+            # Default: GloVe text
+            embeddings, dim = cls._load_glove(filepath, max_words,
+                                              kwargs.get('verbose', True))
+            return cls(embeddings, dim=dim, **kwargs)
+
+    @staticmethod
+    def _load_gensim_model(filepath: str, max_words: int = None,
+                           verbose: bool = True) -> Tuple[Dict[str, np.ndarray], int]:
+        """Load embeddings from Gensim KeyedVectors (.model or .bin)."""
+        try:
+            from gensim.models import KeyedVectors
+        except ImportError:
+            raise ImportError(
+                "gensim is required for loading .model/.bin files. "
+                "Install with: pip install gensim")
+
+        if verbose:
+            print(f"Loading Gensim embeddings from {filepath}...")
+
+        # Try native Gensim format, then Word2Vec binary
+        try:
+            kv = KeyedVectors.load(filepath)
+            if verbose:
+                print(f"  Loaded as native Gensim format")
+        except Exception:
+            try:
+                kv = KeyedVectors.load_word2vec_format(filepath, binary=True)
+                if verbose:
+                    print(f"  Loaded as Word2Vec binary format")
+            except Exception:
+                kv = KeyedVectors.load(filepath, mmap='r')
+                if verbose:
+                    print(f"  Loaded as native Gensim format (mmap)")
+
+        vocab = kv.index_to_key
+        if max_words:
+            vocab = vocab[:max_words]
+
+        embeddings = {}
+        for word in vocab:
+            embeddings[word] = kv[word].astype(np.float32)
+
+        dim = kv.vector_size
+        if verbose:
+            print(f"  Loaded {len(embeddings):,} embeddings with dimension {dim}")
+        return embeddings, dim
+
     @staticmethod
     def _load_glove(filepath: str, max_words: int = None, verbose: bool = True) -> Tuple[Dict[str, np.ndarray], int]:
-        """Load GloVe embeddings from file."""
+        """Load GloVe embeddings from file (text, binary, or gzipped text)."""
+        import gzip
         embeddings = {}
         dim = None
         
@@ -331,6 +435,37 @@ class SenseExplorer:
                     
                     if max_words and len(embeddings) >= max_words:
                         break
+        elif filepath.suffix == '.gz':
+            # Gzipped text format (may have word2vec-style header)
+            first_line = True
+            with gzip.open(filepath, 'rt', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    # Detect word2vec-style header: exactly 2 integer tokens
+                    if first_line and len(parts) == 2:
+                        first_line = False
+                        try:
+                            int(parts[0])
+                            int(parts[1])
+                            if verbose:
+                                print(f"  Detected word2vec header: {parts[0]} words, "
+                                      f"{parts[1]} dimensions — skipping")
+                            continue
+                        except ValueError:
+                            pass  # Not a header
+                    first_line = False
+                    if len(parts) < 3:
+                        continue
+                    word = parts[0]
+                    try:
+                        vec = np.array([float(x) for x in parts[1:]], dtype=np.float32)
+                        embeddings[word] = vec
+                        if dim is None:
+                            dim = len(vec)
+                        if max_words and len(embeddings) >= max_words:
+                            break
+                    except ValueError:
+                        continue
         else:
             # Text format
             with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
