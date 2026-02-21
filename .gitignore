@@ -188,3 +188,4 @@ outdated/
 *.txt
 #*.py # This hurts
 tester*.py
+*.html
